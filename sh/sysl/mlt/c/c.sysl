@@ -1,0 +1,275 @@
+// MLT's C API (`framework/mlt.h`), declared verbatim.
+//
+// **The declarations over the library the machine has.** Nothing here is meant to be called by a
+// program: every name and convention is C's, so an object is a pointer whose lifetime is a reference
+// count, a failure is a non-zero integer or a null pointer, and a callback is one word of code with a
+// `void *` beside it. The module above this one turns those into sysl and is what an application
+// imports.
+//
+// **Every MLT object is a `struct` whose first member is the one it extends** — a producer begins
+// with a service, and a service with a property bag — so the `*_properties` and `*_service` calls
+// below answer the same address under another type. They are declared rather than replaced with a
+// cast so that each step down the chain is the library's own.
+
+module sh.sysl.mlt.c
+@link("mlt-7")
+
+@include("framework/mlt.h")
+
+opaque struct Repository
+opaque struct Properties
+opaque struct Service
+opaque struct Producer
+opaque struct Playlist
+opaque struct Multitrack
+opaque struct Tractor
+opaque struct Field
+opaque struct Filter
+opaque struct Transition
+opaque struct Consumer
+opaque struct Frame
+opaque struct Event
+
+// `struct mlt_profile_s`, the one MLT object whose layout is published; `tests.sysl` asserts its size
+// against the header's.
+struct Profile
+    description: *u8
+    frame_rate_num: i32
+    frame_rate_den: i32
+    width: i32
+    height: i32
+    progressive: i32
+    sample_aspect_num: i32
+    sample_aspect_den: i32
+    display_aspect_num: i32
+    display_aspect_den: i32
+    colorspace: i32
+    is_explicit: i32
+end Profile
+
+// `mlt_color`, passed by value.
+struct Color
+    r: u8
+    g: u8
+    b: u8
+    a: u8
+
+// `mlt_event_data` is a struct holding an untagged union of an `int` and a `void *`. sysl has no
+// spelling for the union, and needs none: the struct is one pointer-sized word in both conventions
+// this package builds for, and MLT supplies `mlt_event_data_to_*` to read it, so it is carried as the
+// word it is and never read here. `tests.sysl` asserts the size.
+struct EventData
+    word: *u8
+
+// ## Factory and repository
+
+extern "mlt_factory_init" factory_init(directory: *u8) -> *Repository
+extern "mlt_factory_repository" factory_repository() -> *Repository
+extern "mlt_factory_directory" factory_directory() -> *u8
+extern "mlt_factory_producer" factory_producer(p: *Profile, service: *u8, resource: *u8) -> *Producer
+extern "mlt_factory_filter" factory_filter(p: *Profile, service: *u8, input: *u8) -> *Filter
+extern "mlt_factory_transition" factory_transition(p: *Profile, service: *u8,
+                                                   input: *u8) -> *Transition
+extern "mlt_factory_consumer" factory_consumer(p: *Profile, service: *u8, input: *u8) -> *Consumer
+extern "mlt_environment" environment(name: *u8) -> *u8
+extern "mlt_repository_producers" repository_producers(r: *Repository) -> *Properties
+extern "mlt_repository_filters" repository_filters(r: *Repository) -> *Properties
+extern "mlt_repository_transitions" repository_transitions(r: *Repository) -> *Properties
+extern "mlt_repository_consumers" repository_consumers(r: *Repository) -> *Properties
+extern "mlt_version_get_string" version_string() -> *u8
+
+// ## Profile
+
+extern "mlt_profile_init" profile_init(name: *u8) -> *Profile
+extern "mlt_profile_load_file" profile_load_file(file: *u8) -> *Profile
+extern "mlt_profile_load_string" profile_load_string(s: *u8) -> *Profile
+extern "mlt_profile_fps" profile_fps(p: *Profile) -> f64
+extern "mlt_profile_sar" profile_sar(p: *Profile) -> f64
+extern "mlt_profile_dar" profile_dar(p: *Profile) -> f64
+extern "mlt_profile_is_valid" profile_is_valid(p: *Profile) -> i32
+extern "mlt_profile_close" profile_close(p: *Profile)
+
+// ## Properties
+
+extern "mlt_properties_new" properties_new() -> *Properties
+extern "mlt_properties_inc_ref" properties_inc_ref(p: *Properties) -> i32
+extern "mlt_properties_dec_ref" properties_dec_ref(p: *Properties) -> i32
+extern "mlt_properties_ref_count" properties_ref_count(p: *Properties) -> i32
+extern "mlt_properties_close" properties_close(p: *Properties)
+extern "mlt_properties_set" properties_set(p: *Properties, name: *u8, value: *u8) -> i32
+extern "mlt_properties_get" properties_get(p: *Properties, name: *u8) -> *u8
+extern "mlt_properties_exists" properties_exists(p: *Properties, name: *u8) -> i32
+extern "mlt_properties_clear" properties_clear(p: *Properties, name: *u8)
+extern "mlt_properties_count" properties_count(p: *Properties) -> i32
+extern "mlt_properties_get_name" properties_get_name(p: *Properties, index: i32) -> *u8
+extern "mlt_properties_get_value" properties_get_value(p: *Properties, index: i32) -> *u8
+extern "mlt_properties_get_int" properties_get_int(p: *Properties, name: *u8) -> i32
+extern "mlt_properties_set_int" properties_set_int(p: *Properties, name: *u8, v: i32) -> i32
+extern "mlt_properties_get_int64" properties_get_int64(p: *Properties, name: *u8) -> i64
+extern "mlt_properties_set_int64" properties_set_int64(p: *Properties, name: *u8, v: i64) -> i32
+extern "mlt_properties_get_double" properties_get_double(p: *Properties, name: *u8) -> f64
+extern "mlt_properties_set_double" properties_set_double(p: *Properties, name: *u8, v: f64) -> i32
+extern "mlt_properties_get_position" properties_get_position(p: *Properties, name: *u8) -> i32
+extern "mlt_properties_set_position" properties_set_position(p: *Properties, name: *u8,
+                                                             v: i32) -> i32
+extern "mlt_properties_get_time" properties_get_time(p: *Properties, name: *u8, format: i32) -> *u8
+extern "mlt_properties_frames_to_time" properties_frames_to_time(p: *Properties, frames: i32,
+                                                                 format: i32) -> *u8
+extern "mlt_properties_time_to_frames" properties_time_to_frames(p: *Properties,
+                                                                 time: *u8) -> i32
+extern "mlt_properties_get_color" properties_get_color(p: *Properties, name: *u8) -> Color
+extern "mlt_properties_set_color" properties_set_color(p: *Properties, name: *u8, v: Color) -> i32
+extern "mlt_properties_lock" properties_lock(p: *Properties)
+extern "mlt_properties_unlock" properties_unlock(p: *Properties)
+
+// ## Events
+
+extern "mlt_events_listen" events_listen(p: *Properties, listener_data: *u8, id: *u8,
+                                         listener: *extern(*Properties, *u8, EventData) -> unit) -> *Event
+extern "mlt_events_disconnect" events_disconnect(p: *Properties, listener_data: *u8)
+extern "mlt_events_setup_wait_for" events_setup_wait_for(p: *Properties, id: *u8) -> *Event
+extern "mlt_events_wait_for" events_wait_for(p: *Properties, e: *Event)
+extern "mlt_events_close_wait_for" events_close_wait_for(p: *Properties, e: *Event)
+extern "mlt_event_data_to_int" event_data_to_int(d: EventData) -> i32
+extern "mlt_event_data_to_string" event_data_to_string(d: EventData) -> *u8
+extern "mlt_event_data_to_frame" event_data_to_frame(d: EventData) -> *Frame
+
+// ## Service
+
+extern "mlt_service_properties" service_properties(s: *Service) -> *Properties
+extern "mlt_service_get_frame" service_get_frame(s: *Service, frame: **Frame, index: i32) -> i32
+extern "mlt_service_attach" service_attach(s: *Service, f: *Filter) -> i32
+extern "mlt_service_detach" service_detach(s: *Service, f: *Filter) -> i32
+extern "mlt_service_filter_count" service_filter_count(s: *Service) -> i32
+extern "mlt_service_set_profile" service_set_profile(s: *Service, p: *Profile)
+
+// ## Producer
+
+extern "mlt_producer_service" producer_service(p: *Producer) -> *Service
+extern "mlt_producer_properties" producer_properties(p: *Producer) -> *Properties
+extern "mlt_producer_seek" producer_seek(p: *Producer, position: i32) -> i32
+extern "mlt_producer_position" producer_position(p: *Producer) -> i32
+extern "mlt_producer_set_in_and_out" producer_set_in_and_out(p: *Producer, i: i32, o: i32) -> i32
+extern "mlt_producer_get_in" producer_get_in(p: *Producer) -> i32
+extern "mlt_producer_get_out" producer_get_out(p: *Producer) -> i32
+extern "mlt_producer_get_playtime" producer_get_playtime(p: *Producer) -> i32
+extern "mlt_producer_get_length" producer_get_length(p: *Producer) -> i32
+extern "mlt_producer_set_speed" producer_set_speed(p: *Producer, speed: f64) -> i32
+extern "mlt_producer_get_speed" producer_get_speed(p: *Producer) -> f64
+extern "mlt_producer_get_fps" producer_get_fps(p: *Producer) -> f64
+extern "mlt_producer_cut" producer_cut(p: *Producer, i: i32, o: i32) -> *Producer
+extern "mlt_producer_close" producer_close(p: *Producer)
+
+// ## Filter
+
+extern "mlt_filter_service" filter_service(f: *Filter) -> *Service
+extern "mlt_filter_properties" filter_properties(f: *Filter) -> *Properties
+extern "mlt_filter_set_in_and_out" filter_set_in_and_out(f: *Filter, i: i32, o: i32)
+extern "mlt_filter_get_in" filter_get_in(f: *Filter) -> i32
+extern "mlt_filter_get_out" filter_get_out(f: *Filter) -> i32
+extern "mlt_filter_close" filter_close(f: *Filter)
+
+// ## Transition
+
+extern "mlt_transition_service" transition_service(t: *Transition) -> *Service
+extern "mlt_transition_properties" transition_properties(t: *Transition) -> *Properties
+extern "mlt_transition_set_in_and_out" transition_set_in_and_out(t: *Transition, i: i32, o: i32)
+extern "mlt_transition_set_tracks" transition_set_tracks(t: *Transition, a: i32, b: i32)
+extern "mlt_transition_get_a_track" transition_get_a_track(t: *Transition) -> i32
+extern "mlt_transition_get_b_track" transition_get_b_track(t: *Transition) -> i32
+extern "mlt_transition_close" transition_close(t: *Transition)
+
+// ## Playlist
+
+extern "mlt_playlist_new" playlist_new(p: *Profile) -> *Playlist
+extern "mlt_playlist_producer" playlist_producer(p: *Playlist) -> *Producer
+extern "mlt_playlist_count" playlist_count(p: *Playlist) -> i32
+extern "mlt_playlist_append" playlist_append(p: *Playlist, producer: *Producer) -> i32
+extern "mlt_playlist_append_io" playlist_append_io(p: *Playlist, producer: *Producer, i: i32,
+                                                   o: i32) -> i32
+extern "mlt_playlist_blank" playlist_blank(p: *Playlist, out: i32) -> i32
+extern "mlt_playlist_remove" playlist_remove(p: *Playlist, where: i32) -> i32
+extern "mlt_playlist_get_clip" playlist_get_clip(p: *Playlist, clip: i32) -> *Producer
+extern "mlt_playlist_clip_start" playlist_clip_start(p: *Playlist, clip: i32) -> i32
+extern "mlt_playlist_clip_length" playlist_clip_length(p: *Playlist, clip: i32) -> i32
+extern "mlt_playlist_is_blank" playlist_is_blank(p: *Playlist, clip: i32) -> i32
+extern "mlt_playlist_mix" playlist_mix(p: *Playlist, clip: i32, length: i32,
+                                       t: *Transition) -> i32
+extern "mlt_playlist_close" playlist_close(p: *Playlist)
+
+// ## Tractor, multitrack and field
+
+extern "mlt_tractor_new" tractor_new() -> *Tractor
+extern "mlt_tractor_producer" tractor_producer(t: *Tractor) -> *Producer
+extern "mlt_tractor_field" tractor_field(t: *Tractor) -> *Field
+extern "mlt_tractor_multitrack" tractor_multitrack(t: *Tractor) -> *Multitrack
+extern "mlt_tractor_set_track" tractor_set_track(t: *Tractor, p: *Producer, index: i32) -> i32
+extern "mlt_tractor_get_track" tractor_get_track(t: *Tractor, index: i32) -> *Producer
+extern "mlt_tractor_close" tractor_close(t: *Tractor)
+extern "mlt_multitrack_count" multitrack_count(m: *Multitrack) -> i32
+extern "mlt_field_plant_filter" field_plant_filter(f: *Field, filter: *Filter, track: i32) -> i32
+extern "mlt_field_plant_transition" field_plant_transition(f: *Field, t: *Transition, a: i32,
+                                                           b: i32) -> i32
+
+// ## Consumer
+
+extern "mlt_consumer_service" consumer_service(c: *Consumer) -> *Service
+extern "mlt_consumer_properties" consumer_properties(c: *Consumer) -> *Properties
+extern "mlt_consumer_connect" consumer_connect(c: *Consumer, producer: *Service) -> i32
+extern "mlt_consumer_start" consumer_start(c: *Consumer) -> i32
+extern "mlt_consumer_stop" consumer_stop(c: *Consumer) -> i32
+extern "mlt_consumer_is_stopped" consumer_is_stopped(c: *Consumer) -> i32
+extern "mlt_consumer_position" consumer_position(c: *Consumer) -> i32
+extern "mlt_consumer_close" consumer_close(c: *Consumer)
+
+// ## Frame
+
+extern "mlt_frame_properties" frame_properties(f: *Frame) -> *Properties
+extern "mlt_frame_get_position" frame_get_position(f: *Frame) -> i32
+extern "mlt_frame_get_image" frame_get_image(f: *Frame, buffer: **u8, format: *i32, width: *i32,
+                                             height: *i32, writable: i32) -> i32
+extern "mlt_frame_get_audio" frame_get_audio(f: *Frame, buffer: **u8, format: *i32, frequency: *i32,
+                                             channels: *i32, samples: *i32) -> i32
+extern "mlt_frame_close" frame_close(f: *Frame)
+extern "mlt_image_format_size" image_format_size(format: i32, width: i32, height: i32,
+                                                 bpp: *i32) -> i32
+extern "mlt_audio_calculate_frame_samples" audio_calculate_frame_samples(fps: f32, frequency: i32,
+                                                                       position: i64) -> i32
+extern "mlt_service_profile" service_profile(s: *Service) -> *Profile
+extern "mlt_audio_format_size" audio_format_size(format: i32, samples: i32, channels: i32) -> i32
+
+// ## libc
+
+// `free`, for the two MLT answers that are `malloc`'d and the caller's: neither is bound yet, and
+// the declaration is here so that the one that is added frees what it is given.
+extern "free" free(p: *u8)
+
+// `strdup`, for a profile's description, which `mlt_profile_close` frees.
+extern "strdup" strdup(s: *u8) -> *u8
+
+// `setenv`, for `MLT_REPOSITORY_DENY`, which MLT reads from the environment when the repository loads.
+extern "setenv" setenv(name: *u8, value: *u8, overwrite: i32) -> i32
+
+c const
+    PROFILE_SIZE: usize = "sizeof(struct mlt_profile_s)"
+    COLOR_SIZE: usize = "sizeof(mlt_color)"
+    EVENT_DATA_SIZE: usize = "sizeof(mlt_event_data)"
+
+    IMAGE_NONE: i32 = "mlt_image_none"
+    IMAGE_RGB: i32 = "mlt_image_rgb"
+    IMAGE_RGBA: i32 = "mlt_image_rgba"
+    IMAGE_YUV422: i32 = "mlt_image_yuv422"
+    IMAGE_YUV420P: i32 = "mlt_image_yuv420p"
+
+    AUDIO_NONE: i32 = "mlt_audio_none"
+    AUDIO_S16: i32 = "mlt_audio_s16"
+    AUDIO_S32: i32 = "mlt_audio_s32"
+    AUDIO_FLOAT: i32 = "mlt_audio_float"
+    AUDIO_S32LE: i32 = "mlt_audio_s32le"
+    AUDIO_F32LE: i32 = "mlt_audio_f32le"
+    AUDIO_U8: i32 = "mlt_audio_u8"
+
+    TIME_FRAMES: i32 = "mlt_time_frames"
+    TIME_CLOCK: i32 = "mlt_time_clock"
+    TIME_SMPTE_DF: i32 = "mlt_time_smpte_df"
+    TIME_SMPTE_NDF: i32 = "mlt_time_smpte_ndf"

@@ -1,0 +1,188 @@
+module sh.sysl.mlt
+
+import sh.sysl.mlt.c
+import sysl.buf.{Buf, buf}
+import sysl.text.{cstring, from_cstring}
+
+/** How a time is written: a frame count, a clock time, or one of the two SMPTE timecodes. */
+enum TimeFormat
+    /** A plain frame count, `"90"`. */
+    Frames
+
+    /** A SMIL clock value, `"00:00:03.600"`. */
+    Clock
+
+    /** SMPTE drop-frame timecode, `"00:00:03;15"`. */
+    SmpteDf
+
+    /** SMPTE non-drop-frame timecode, `"00:00:03:15"`. */
+    SmpteNdf
+
+    private[mlt] code(self) -> i32 = self match
+        Frames -> c.TIME_FRAMES
+        Clock -> c.TIME_CLOCK
+        SmpteDf -> c.TIME_SMPTE_DF
+        SmpteNdf -> c.TIME_SMPTE_NDF
+end TimeFormat
+
+/** A colour, eight bits a channel. */
+type Color = c.Color
+
+/** A C string read into a `string`, or `None` where MLT answered null. */
+private[mlt] text_of(p: *u8) -> Option[string] =
+    if p == null then None else from_cstring(p).ok()
+
+/** What an event was fired with. MLT carries an integer, a string, a frame or an object in one word,
+ * and which it is is the event's documented contract rather than anything the word says.
+ */
+struct Event
+    private data: c.EventData
+
+    /** The integer an event such as `property-changed`'s position was fired with. */
+    int(self) -> int = c.event_data_to_int(self.data)
+
+    /** The string an event such as `property-changed` was fired with — the property's name. */
+    text(self) -> Option[string] = text_of(c.event_data_to_string(self.data))
+
+    /** The frame an event such as `consumer-frame-show` was fired with, with a reference of its own
+     * taken, so it may be kept after the listener returns. */
+    frame(self) -> Option[&Frame]
+        val f = c.event_data_to_frame(self.data)
+
+        if f == null then return None
+
+        c.properties_inc_ref(c.frame_properties(f))
+        Some(adopt_frame(f, 0, 0, 0.0))
+end Event
+
+/** One registered listener: the box MLT's `listener_data` points at. The object it listens to holds
+ * it, so it lives exactly as long as MLT can call it. */
+struct Listener
+    private cb: &sync Fn(Event) -> unit
+
+/** The one function MLT calls for every listener, finding the closure through `listener_data`.
+ *
+ * It is `@export`ed because `mlt_listener` takes `mlt_event_data` by value, and a sysl function
+ * with an aggregate in its signature has no C-convention address otherwise.
+ */
+@export("sh_sysl_mlt_listener")
+private listener_fired(owner: *c.Properties, data: *u8, ev: c.EventData) -> unit
+    val l: *Listener = ptr_cast(data)
+
+    l.cb(Event(ev))
+
+/** Everything MLT makes is a property bag first, and this is what every one of them can do.
+ *
+ * **Every value is a string underneath**: `set_int` stores `"24"`, and `get_int` of a property set
+ * as `"24"` answers `24`. A property that was never set reads as `None` from `get` and `0` from the
+ * numeric getters, which is MLT's own convention.
+ */
+trait Object
+    properties_ptr(self) -> *c.Properties
+    listeners(self) -> Buf[&Listener]
+
+    /** The property `name`, or `None` where it is not set. */
+    get(self, name: string) -> Option[string] =
+        text_of(c.properties_get(self.properties_ptr(), cstring(name).ptr))
+
+    /** Set `name` to `value`. */
+    set(self, name: string, value: string) -> Result[unit, Error] =
+        checked("mlt_properties_set", c.properties_set(self.properties_ptr(), cstring(name).ptr,
+                                                       cstring(value).ptr))
+
+    /** Whether `name` is set at all. */
+    has(self, name: string) -> bool =
+        c.properties_exists(self.properties_ptr(), cstring(name).ptr) != 0
+
+    /** Remove `name`. */
+    clear(self, name: string) = c.properties_clear(self.properties_ptr(), cstring(name).ptr)
+
+    /** How many properties are set. */
+    count(self) -> int = c.properties_count(self.properties_ptr())
+
+    get_int(self, name: string) -> int = c.properties_get_int(self.properties_ptr(), cstring(name).ptr)
+
+    set_int(self, name: string, value: int) -> Result[unit, Error] =
+        checked("mlt_properties_set_int",
+                c.properties_set_int(self.properties_ptr(), cstring(name).ptr, i32(value)))
+
+    get_int64(self, name: string) -> long =
+        c.properties_get_int64(self.properties_ptr(), cstring(name).ptr)
+
+    set_int64(self, name: string, value: long) -> Result[unit, Error] =
+        checked("mlt_properties_set_int64",
+                c.properties_set_int64(self.properties_ptr(), cstring(name).ptr, value))
+
+    get_double(self, name: string) -> f64 =
+        c.properties_get_double(self.properties_ptr(), cstring(name).ptr)
+
+    set_double(self, name: string, value: f64) -> Result[unit, Error] =
+        checked("mlt_properties_set_double",
+                c.properties_set_double(self.properties_ptr(), cstring(name).ptr, value))
+
+    /** A position: a frame number, read from a frame count or a timecode alike. */
+    get_position(self, name: string) -> int =
+        c.properties_get_position(self.properties_ptr(), cstring(name).ptr)
+
+    set_position(self, name: string, frames: int) -> Result[unit, Error] =
+        checked("mlt_properties_set_position",
+                c.properties_set_position(self.properties_ptr(), cstring(name).ptr, i32(frames)))
+
+    get_color(self, name: string) -> Color =
+        c.properties_get_color(self.properties_ptr(), cstring(name).ptr)
+
+    set_color(self, name: string, value: Color) -> Result[unit, Error] =
+        checked("mlt_properties_set_color",
+                c.properties_set_color(self.properties_ptr(), cstring(name).ptr, value))
+
+    /** The property `name`, a time, written in `format` at the frame rate of this object's profile. */
+    get_time(self, name: string, format: TimeFormat) -> Option[string] =
+        text_of(c.properties_get_time(self.properties_ptr(), cstring(name).ptr, format.code()))
+
+    /** `frames` written in `format` at the frame rate of this object's profile. */
+    frames_to_time(self, frames: int, format: TimeFormat) -> Option[string] =
+        text_of(c.properties_frames_to_time(self.properties_ptr(), i32(frames), format.code()))
+
+    /** A time in any of the formats, read as a frame count at this object's frame rate. */
+    time_to_frames(self, time: string) -> int =
+        c.properties_time_to_frames(self.properties_ptr(), cstring(time).ptr)
+
+    /** How many references MLT counts on this object, this one included. */
+    ref_count(self) -> int = c.properties_ref_count(self.properties_ptr())
+
+    /** Call `cb` every time this object fires `event`.
+     *
+     * **It may be called on another thread** — a consumer fires `consumer-frame-show` from the
+     * thread it renders on — so `cb` is a `&sync Fn`, and what it may capture is checked where the
+     * closure is written: a `&sync` reference, a scalar or a `*T`, never a plain `&T` or a `string`.
+     * The listener lasts as long as this object does.
+     */
+    on(self, event: string, cb: &sync Fn(Event) -> unit)
+        val l: &Listener = Listener(cb)
+
+        self.listeners().push(l)
+        c.events_listen(self.properties_ptr(), ptr_cast(&*l), cstring(event).ptr, &listener_fired)
+end Object
+
+/** Disconnect every listener a dying object registered, so that an object MLT keeps alive after
+ * this reference goes cannot call into a box that is about to be freed. */
+private[mlt] disconnect_all(p: *c.Properties, ls: Buf[&Listener])
+    for l in ls.elems[0..<ls.len()] do c.events_disconnect(p, ptr_cast(&*l))
+    ls.clear()
+
+/** A free-standing property bag, for passing settings around. */
+struct Properties
+    private raw: *c.Properties
+    private ls: Buf[&Listener]
+
+impl Object for Properties
+    properties_ptr(self) -> *c.Properties = self.raw
+    listeners(self) -> Buf[&Listener] = self.ls
+
+impl Drop for Properties
+    drop(self)
+        disconnect_all(self.raw, self.ls)
+        c.properties_close(self.raw)
+
+/** An empty property bag. */
+properties() -> &Properties = Properties(c.properties_new(), buf())

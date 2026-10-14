@@ -1,0 +1,49 @@
+module sh.sysl.mlt
+
+/** Why an MLT call did not do what was asked.
+ *
+ * **MLT says almost nothing about a failure** — a constructor answers a null pointer and a call
+ * answers a non-zero integer, with the reason, where there is one, written to MLT's log. So each
+ * variant here is what the *binding* knows about the call it made: which service it asked for,
+ * which file, which profile.
+ */
+enum Error
+    /** The repository has no `kind` service called `name` (`kind` is `producer`, `filter`,
+     * `transition` or `consumer`). */
+    UnknownService(kind: string, name: string)
+
+    /** A producer for `path` could not be made: there is no such file, or none of the
+     * repository's producers could open it. */
+    MissingFile(path: string)
+
+    /** No profile called `name`, or a description that does not make a valid profile. */
+    InvalidProfile(name: string)
+
+    /** The plugin repository could not be loaded from `dir`. */
+    NoRepository(dir: string)
+
+    /** `call` answered `code`. */
+    Failed(call: string, code: int)
+
+    /** A frame could not produce the image or audio asked of it. */
+    NoMedia(what: string)
+
+    /** What went wrong, as one sentence. */
+    message(self) -> string = self match
+        UnknownService(kind, name) -> s"no $kind service called '$name'"
+        MissingFile(path) -> s"cannot open '$path'"
+        InvalidProfile(name) -> s"no valid profile '$name'"
+        NoRepository(dir) -> s"no MLT plugin repository at '$dir'"
+        Failed(call, code) -> s"$call failed with $code"
+        NoMedia(what) -> s"the frame has no $what"
+end Error
+
+impl Display for Error
+    display(self, out: *Writer, fmt: FormatSpec) = display_str(self.message(), out, fmt)
+
+impl Eq for Error
+    eq(self, rhs: Error) -> bool = self.message() == rhs.message()
+
+/** An MLT return code read as a `Result`: zero is success, anything else is `call` failing. */
+private[mlt] checked(call: string, code: i32) -> Result[unit, Error] =
+    if code == 0 then Ok(()) else Err(Failed(call, code))

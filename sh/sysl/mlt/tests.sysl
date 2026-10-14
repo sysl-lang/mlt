@@ -1,0 +1,453 @@
+module sh.sysl.mlt
+@tests
+
+// What this binding claims, run by `sysl test .`.
+//
+// **Each test has an oracle that is not MLT's word for itself**: a colour is checked against the
+// bytes its hex spelling names, a render against `ffprobe`, a timecode against arithmetic, an XML
+// document against the document written out by hand.
+
+import sh.sysl.mlt.c
+import sysl.fs.{make_temp_dir, read_text, remove_dir_all}
+import sysl.posix.threads.{current, yield_now}
+import sysl.process.capture
+import sysl.sync.Atomic
+import sysl.text.Search
+
+// **No test may load a module that touches the screen or a device.** `sdl2` puts a modal dialog up
+// when SDL3 cannot be found (see `init`), `qt6` is a GUI toolkit, `rtaudio` and `decklink` open
+// hardware. `opencv` brings in TBB, whose exit-time destructor calls into code already unmapped in a
+// process under AddressSanitizer. Every test runs in a process of its own, and this runs first in
+// each, before anything else has loaded the repository; `denied_modules_are_absent` proves the list
+// took.
+private val DENIED: [5]string = ["sdl2", "qt6", "rtaudio", "decklink", "opencv"]
+
+@setup
+load_without_devices()
+    init(DENIED).expect("the repository")
+
+private small() -> &Profile = custom_profile(64, 48, 25).expect("a 64x48 25 fps profile")
+
+// -- Layout ---------------------------------------------------------------------------------------
+
+@test("the structs declared on this side are the size C makes them")
+struct_layout()
+    assert_eq(sizeof(c.Profile), c.PROFILE_SIZE)
+    assert_eq(sizeof(c.Color), c.COLOR_SIZE)
+    assert_eq(sizeof(c.EventData), c.EVENT_DATA_SIZE)
+
+// -- Repository and profiles ----------------------------------------------------------------------
+
+@test("the plugin repository loads, and from the directory brew installed")
+repository_loads()
+    val dir = init().expect("the repository")
+
+    assert(dir.ends_with("/lib/mlt"))
+    assert(version().starts_with("7."))
+
+@test("no test process can reach the sdl2, qt6, rtaudio or decklink services")
+denied_modules_are_absent()
+    assert(!has_service("consumer", "sdl2").expect("query"))
+    assert(!has_service("consumer", "sdl2_audio").expect("query"))
+    assert(!has_service("consumer", "rtaudio").expect("query"))
+    assert(!has_service("consumer", "decklink").expect("query"))
+    assert(!has_service("transition", "qtblend").expect("query"))
+    assert(has_service("consumer", "avformat").expect("query"))
+    assert(has_service("consumer", "xml").expect("query"))
+
+@test("a named profile reads back the numbers in its file")
+named_profile()
+    val p = profile("atsc_1080p_25").expect("atsc_1080p_25")
+
+    assert_eq(p.width(), 1920)
+    assert_eq(p.height(), 1080)
+    assert_eq(p.frame_rate_num(), 25)
+    assert_eq(p.frame_rate_den(), 1)
+    assert_eq(p.fps(), 25.0)
+    assert(p.progressive())
+
+@test("a custom profile has the numbers it was made with")
+custom_profile_numbers()
+    val p = custom_profile(64, 48, 30000, 1001).expect("ntsc-rate profile")
+
+    assert_eq(p.width(), 64)
+    assert_eq(p.height(), 48)
+    assert_eq(p.frame_rate_num(), 30000)
+    assert_eq(p.frame_rate_den(), 1001)
+    assert(p.fps() > 29.97 && p.fps() < 29.98)
+
+// -- Properties -----------------------------------------------------------------------------------
+
+@test("a property set as one type reads back as itself and as a string")
+property_round_trips()
+    val p = properties()
+
+    p.set("name", "clip one").expect("set")
+    p.set_int("count", 24).expect("set_int")
+    p.set_int64("big", 5000000000).expect("set_int64")
+    p.set_double("level", 0.25).expect("set_double")
+
+    assert_eq(p.get("name"), Some("clip one"))
+    assert_eq(p.get_int("count"), 24)
+    assert_eq(p.get("count"), Some("24"))
+    assert_eq(p.get_int64("big"), 5000000000)
+    assert_eq(p.get_double("level"), 0.25)
+    assert_eq(p.count(), 4)
+    assert(p.has("level"))
+
+    p.clear("level")
+
+    assert(!p.has("level"))
+    assert_eq(p.get("level"), None)
+    assert_eq(p.get_int("never"), 0)
+
+@test("a position reads back as each kind of time at the profile's frame rate")
+timecode_round_trips()
+    val k = producer(small(), "color:#000000").expect("a colour producer")
+
+    k.set_position("mark", 90).expect("set_position")
+
+    // 90 frames at 25 fps is 3 s and 15 frames, or 3.6 s.
+    assert_eq(k.get_position("mark"), 90)
+    assert_eq(k.get_time("mark", SmpteNdf), Some("00:00:03:15"))
+    assert_eq(k.get_time("mark", Clock), Some("00:00:03.600"))
+    assert_eq(k.get_time("mark", Frames), Some("90"))
+    assert_eq(k.frames_to_time(1501, SmpteNdf), Some("00:01:00:01"))
+    assert_eq(k.time_to_frames("00:01:00:01"), 1501)
+    assert_eq(k.time_to_frames("00:00:03.600"), 90)
+
+@test("a colour property reads back as its channels")
+color_round_trips()
+    val p = properties()
+
+    // MLT reads `0xRRGGBBAA`, and `#AARRGGBB` with the alpha first.
+    p.set("bg", "0x10203040").expect("set")
+    p.set("argb", "#40102030").expect("set")
+
+    val got = p.get_color("bg")
+    val argb = p.get_color("argb")
+
+    assert_eq((got.r, got.g, got.b, got.a), (u8(0x10), u8(0x20), u8(0x30), u8(0x40)))
+    assert_eq((argb.r, argb.g, argb.b, argb.a), (u8(0x10), u8(0x20), u8(0x30), u8(0x40)))
+
+    p.set_color("fg", Color(1, 2, 3, 4)).expect("set_color")
+
+    // and writes `#AARRGGBB`.
+    assert_eq(p.get("fg"), Some("#04010203"))
+
+    val fg = p.get_color("fg")
+
+    assert_eq((fg.r, fg.g, fg.b, fg.a), (u8(1), u8(2), u8(3), u8(4)))
+
+// -- Frames ---------------------------------------------------------------------------------------
+
+@test("a colour producer's frame is the colour, in every pixel, in RGBA and in RGB")
+color_pixels()
+    val k = producer(small(), "color:#ff8000").expect("a colour producer")
+    val img = k.frame().expect("a frame").image(Rgba).expect("an RGBA image")
+
+    assert_eq((img.width, img.height), (64, 48))
+    assert_eq(img.pixels.len, 64 * 48 * 4)
+
+    for i in 0..<(64 * 48)
+        assert_eq((img.pixels[4 * i], img.pixels[4 * i + 1], img.pixels[4 * i + 2], img.pixels[4 * i + 3]),
+                  (u8(255), u8(128), u8(0), u8(255)))
+
+    val rgb = k.frame().expect("a second frame").image(Rgb).expect("an RGB image")
+
+    assert_eq(rgb.pixels.len, 64 * 48 * 3)
+    assert_eq((rgb.pixels[0], rgb.pixels[1], rgb.pixels[2]), (u8(255), u8(128), u8(0)))
+
+@test("frames come from successive positions, and seeking moves the next one")
+frame_positions()
+    val k = producer(small(), "color:#000000").expect("a colour producer")
+
+    assert_eq(k.frame().expect("frame 0").position(), 0)
+    assert_eq(k.frame().expect("frame 1").position(), 1)
+    assert_eq(k.frame_at(17).expect("frame 17").position(), 17)
+    assert_eq(k.position(), 18)
+
+@test("a frame's audio is the samples in one frame at the profile's rate")
+frame_audio()
+    val k = producer(small(), "noise:").expect("a noise producer")
+    val a = k.frame().expect("a frame").audio(S16, 48000, 2).expect("audio")
+
+    // 48000 samples a second at 25 frames a second.
+    assert_eq(a.samples, 1920)
+    assert_eq((a.frequency, a.channels), (48000, 2))
+    assert_eq(a.data.len, 1920 * 2 * 2)
+
+@test("an image keeps its frame alive after the frame's own name has gone")
+image_outlives_frame()
+    val img = producer(small(), "color:#0000ff").expect("a colour producer").frame().expect("a frame")
+        .image(Rgba).expect("an image")
+
+    assert_eq(img.frame.ref_count(), 1)
+    assert_eq((img.pixels[0], img.pixels[1], img.pixels[2]), (u8(0), u8(0), u8(255)))
+
+// -- Ownership ------------------------------------------------------------------------------------
+
+@test("a playlist holds a reference of its own to what it plays")
+playlist_references()
+    val prof = small()
+    val k = producer(prof, "color:#ffffff").expect("a colour producer")
+
+    assert_eq(k.ref_count(), 1)
+
+    val pl = playlist(prof).expect("a playlist")
+
+    pl.append_io(k, 0, 9).expect("append")
+
+    assert(k.ref_count() > 1, "the playlist did not take a reference")
+
+    val clip = pl.clip(0).expect("clip 0")
+    val held = clip.ref_count()
+
+    assert(pl.clip(5).is_none())
+    assert_eq(clip.ref_count(), held)
+
+@test("a producer dropped after it was appended still plays in the playlist")
+playlist_outlives_producer()
+    val prof = small()
+    val pl = playlist(prof).expect("a playlist")
+
+    pl.append_io(producer(prof, "color:#00ff00").expect("a colour producer"), 0, 4).expect("append")
+
+    val img = pl.frame().expect("a frame").image(Rgba).expect("an image")
+
+    assert_eq((img.pixels[0], img.pixels[1], img.pixels[2]), (u8(0), u8(255), u8(0)))
+    assert_eq(pl.playtime(), 5)
+
+// -- Playlists, tractors, filters, transitions -------------------------------------------------
+
+@test("a playlist plays its clips and blanks one after another")
+playlist_sequence()
+    val prof = small()
+    val pl = playlist(prof).expect("a playlist")
+
+    pl.append_io(producer(prof, "color:#ff0000").expect("red"), 0, 9).expect("append red")
+    pl.blank(5).expect("blank")
+    pl.append_io(producer(prof, "color:#0000ff").expect("blue"), 0, 4).expect("append blue")
+
+    assert_eq(pl.clip_count(), 3)
+    assert_eq((pl.clip_start(0), pl.clip_length(0)), (0, 10))
+    assert_eq((pl.clip_start(1), pl.clip_length(1)), (10, 5))
+    assert_eq((pl.clip_start(2), pl.clip_length(2)), (15, 5))
+    assert(pl.is_blank(1))
+    assert_eq(pl.playtime(), 20)
+
+    val blue = pl.frame_at(16).expect("frame 16").image(Rgba).expect("an image")
+
+    assert_eq((blue.pixels[0], blue.pixels[1], blue.pixels[2]), (u8(0), u8(0), u8(255)))
+
+@test("a filter attached to a producer changes every frame it makes")
+filter_attached()
+    val prof = small()
+    val k = producer(prof, "noise:").expect("noise")
+
+    assert(!silent(k.frame().expect("a frame").audio(S16).expect("audio").data), "noise was silent")
+
+    // The loader attaches its own normalising filters, so the count is measured from theirs.
+    val before = k.filter_count()
+    val f = filter(prof, "volume").expect("volume")
+
+    f.set_double("gain", 0.0).expect("gain")
+    k.attach(f).expect("attach")
+
+    assert_eq(k.filter_count(), before + 1)
+    assert(silent(k.frame().expect("a frame").audio(S16).expect("audio").data), "gain 0 was not silent")
+
+    k.detach(f).expect("detach")
+
+    assert_eq(k.filter_count(), before)
+    assert(!silent(k.frame().expect("a frame").audio(S16).expect("audio").data), "detached and silent")
+
+private silent(data: []const u8) -> bool
+    for b in data do if b != 0 then return false
+
+    true
+
+@test("a tractor's transition puts its B track over its A track")
+tractor_transition()
+    val prof = small()
+    val tr = tractor(prof).expect("a tractor")
+
+    tr.set_track(producer(prof, "color:#ff0000").expect("red"), 0).expect("track 0")
+    tr.set_track(producer(prof, "color:#0000ff").expect("blue"), 1).expect("track 1")
+
+    val t = transition(prof, "affine").expect("affine")
+
+    t.set_in_and_out(0, 9)
+    tr.plant_transition(t, 0, 1).expect("plant")
+    tr.set_in_and_out(0, 9).expect("in and out")
+
+    assert_eq(tr.track_count(), 2)
+    assert_eq((t.a_track(), t.b_track()), (0, 1))
+
+    val img = tr.frame().expect("a frame").image(Rgba).expect("an image")
+
+    assert_eq((img.pixels[0], img.pixels[1], img.pixels[2]), (u8(0), u8(0), u8(255)))
+
+    val red = tr.track(0).expect("track 0").frame().expect("a frame").image(Rgba).expect("an image")
+
+    assert_eq((red.pixels[0], red.pixels[1], red.pixels[2]), (u8(255), u8(0), u8(0)))
+    assert(tr.track(2).is_none())
+
+// -- Errors ---------------------------------------------------------------------------------------
+
+@test("an unknown service, a missing file and an invalid profile each say which")
+error_paths()
+    val prof = small()
+
+    assert_eq(producer(prof, "nosuchservice:x").err(), Some(UnknownService("producer", "nosuchservice")))
+    assert_eq(producer(prof, "/no/such/clip.mp4").err(), Some(MissingFile("/no/such/clip.mp4")))
+    assert_eq(service_producer(prof, "avformat", "/no/such/clip.mp4").err(),
+              Some(MissingFile("/no/such/clip.mp4")))
+    assert_eq(filter(prof, "nosuchfilter").err(), Some(UnknownService("filter", "nosuchfilter")))
+    assert_eq(transition(prof, "nosuchtransition").err(),
+              Some(UnknownService("transition", "nosuchtransition")))
+    assert_eq(consumer(prof, "nosuchconsumer").err(), Some(UnknownService("consumer", "nosuchconsumer")))
+    assert_eq(profile("no_such_profile").err(), Some(InvalidProfile("no_such_profile")))
+    assert_eq(profile_from("width=64\n").err(), Some(InvalidProfile("width=64\n")))
+    assert_eq(producer(prof, "nosuchservice:x").err().unwrap().message(),
+              "no producer service called 'nosuchservice'")
+
+// -- Consumers ------------------------------------------------------------------------------------
+
+private struct Shows
+    count: Atomic[int]
+    thread: Atomic[u64]
+
+@test("a render to mp4 has the frames, size, length and codec ffprobe reads back, and a listener on the render thread saw every frame")
+render_mp4()
+    val dir = make_temp_dir("sysl-mlt").expect("a temp dir")
+    val file = dir + "/out.mp4"
+    val prof = small()
+    val k = producer(prof, "color:#336699").expect("a colour producer")
+
+    k.set_in_and_out(0, 49).expect("50 frames")
+
+    val out = consumer(prof, "avformat", file).expect("an avformat consumer")
+
+    out.set("f", "mp4").expect("f")
+    out.set("vcodec", "mpeg4").expect("vcodec")
+    out.set_int("an", 1).expect("an")
+    out.set_int("real_time", -1).expect("real_time")
+
+    val shows: &sync Shows = Shows(Atomic(0), Atomic(0))
+
+    out.on("consumer-frame-show", (e) ->
+        shows.count.add(1)
+        shows.thread.store(current().id))
+    out.connect(k).expect("connect")
+    out.run().expect("rendered")
+
+    assert(out.is_stopped())
+    assert_eq(shows.count.load(), 50)
+    assert(shows.thread.load() != current().id, "the event was fired on the caller's thread")
+
+    val probe = capture("ffprobe", ["-v", "error", "-select_streams", "v:0", "-count_frames",
+                                    "-show_entries", "stream=codec_name,width,height,nb_read_frames",
+                                    "-show_entries", "format=duration", "-of", "default=nw=1", file])
+        .expect("ffprobe ran")
+
+    assert_eq(probe.text, "codec_name=mpeg4\nwidth=64\nheight=48\nnb_read_frames=50\nduration=2.000000\n")
+
+    remove_dir_all(dir).expect("removed")
+
+@test("the xml consumer writes a playlist and a tractor as the document written out here")
+xml_document()
+    val dir = make_temp_dir("sysl-mlt").expect("a temp dir")
+    val file = dir + "/out.mlt"
+    val prof = small()
+    val pl = playlist(prof).expect("a playlist")
+
+    pl.append_io(producer(prof, "color:#ff0000").expect("red"), 0, 9).expect("append")
+    pl.blank(5).expect("blank")
+
+    val tr = tractor(prof).expect("a tractor")
+
+    tr.set_track(pl, 0).expect("track 0")
+    tr.set_track(producer(prof, "color:#0000ff").expect("blue"), 1).expect("track 1")
+
+    val out = consumer(prof, "xml", file).expect("an xml consumer")
+
+    out.set_int("no_meta", 1).expect("no_meta")
+    out.set("root", "").expect("root")
+    out.connect(tr).expect("connect")
+    out.run().expect("written")
+
+    val got = read_text(file).expect("the document")
+
+    assert_eq(got, XML_EXPECTED)
+
+    remove_dir_all(dir).expect("removed")
+
+// The document for: a red clip's frames 0 to 9 and five blank frames on track 0, a blue clip on
+// track 1. A colour producer is 15000 frames long until it is told otherwise.
+private val XML_EXPECTED: string = raw"""
+<?xml version="1.0" encoding="utf-8"?>
+<mlt LC_NUMERIC="C" version="7.40.0" root="">
+  <profile description="custom" width="64" height="48" progressive="1" sample_aspect_num="1" sample_aspect_den="1" display_aspect_num="64" display_aspect_den="48" frame_rate_num="25" frame_rate_den="1" colorspace="601"/>
+  <producer id="producer0" in="0" out="14999">
+    <property name="length">15000</property>
+    <property name="eof">pause</property>
+    <property name="resource">#ff0000</property>
+    <property name="aspect_ratio">1</property>
+    <property name="mlt_service">color</property>
+  </producer>
+  <playlist id="playlist0">
+    <entry producer="producer0" in="0" out="9"/>
+    <blank length="5"/>
+  </playlist>
+  <producer id="producer1" in="0" out="14999">
+    <property name="length">15000</property>
+    <property name="eof">continue</property>
+    <property name="resource">#0000ff</property>
+    <property name="aspect_ratio">1</property>
+    <property name="mlt_service">color</property>
+  </producer>
+  <tractor id="tractor0" in="0" out="14999">
+    <track producer="playlist0"/>
+    <track producer="producer1"/>
+  </tractor>
+</mlt>
+"""
+
+@test("run on the null consumer renders the source once and returns")
+null_consumer_runs_to_the_end()
+    val prof = small()
+    val k = producer(prof, "color:#000000").expect("a colour producer")
+
+    k.set_in_and_out(0, 9).expect("10 frames")
+
+    val out = consumer(prof, "null").expect("a null consumer")
+    val shows: &sync Shows = Shows(Atomic(0), Atomic(0))
+
+    out.set_int("real_time", -1).expect("real_time")
+    out.on("consumer-frame-show", (e) ->
+        shows.count.add(1)
+        shows.thread.store(u64(e.frame().unwrap().position())))
+    out.connect(k).expect("connect")
+    out.run().expect("rendered")
+
+    // Frames 0 to 9, then frame 9 once more: the source pauses on its last frame, and the null
+    // consumer shows the paused frame before `terminate_on_pause` stops it. (`avformat` does not
+    // write it, which `render_mp4`'s count of 50 shows.)
+    assert_eq(shows.count.load(), 11)
+    assert_eq(shows.thread.load(), 9)
+
+@test("a consumer dropped while it is still running is stopped first")
+consumer_dropped_running()
+    val prof = small()
+    val k = producer(prof, "color:#000000").expect("a colour producer")
+    val out = consumer(prof, "null").expect("a null consumer")
+    val shows: &sync Shows = Shows(Atomic(0), Atomic(0))
+
+    out.on("consumer-frame-show", (e) -> shows.count.add(1))
+    out.connect(k).expect("connect")
+    out.start().expect("started")
+
+    while shows.count.load() < 3 do yield_now()
+
+    assert(!out.is_stopped())

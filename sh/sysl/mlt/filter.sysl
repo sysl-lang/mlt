@@ -1,0 +1,87 @@
+module sh.sysl.mlt
+
+import sh.sysl.mlt.c
+import sysl.buf.{Buf, buf}
+import sysl.text.cstring
+
+/** A filter: something done to every frame of whatever it is attached to or planted on. */
+struct Filter
+    private raw: *c.Filter
+    private prof: &Profile
+    private ls: Buf[&Listener]
+
+    private[mlt] ptr(self) -> *c.Filter = self.raw
+
+    in_point(self) -> int = c.filter_get_in(self.raw)
+    out_point(self) -> int = c.filter_get_out(self.raw)
+
+    /** Apply only from `in` to `out`, inclusive. */
+    set_in_and_out(self, in_point: int, out_point: int) =
+        c.filter_set_in_and_out(self.raw, i32(in_point), i32(out_point))
+end Filter
+
+impl Object for Filter
+    properties_ptr(self) -> *c.Properties = c.filter_properties(self.raw)
+    listeners(self) -> Buf[&Listener] = self.ls
+
+impl Drop for Filter
+    drop(self)
+        disconnect_all(c.filter_properties(self.raw), self.ls)
+        c.filter_close(self.raw)
+
+/** The filter service `service`, with `arg` as its argument where it takes one. */
+filter(profile: &Profile, service: string, arg: string = "") -> Result[&Filter, Error]
+    init()?
+
+    if !registered(c.repository_filters(c.factory_repository()), service)
+        return Err(UnknownService("filter", service))
+
+    val a = cstring(arg)
+    val f = c.factory_filter(profile.ptr(), cstring(service).ptr, if arg == "" then null else a.ptr)
+
+    if f == null then return Err(Failed("mlt_factory_filter", -1))
+
+    Ok(Filter(f, profile, buf()))
+
+/** A transition: two tracks combined into one over a span of frames. */
+struct Transition
+    private raw: *c.Transition
+    private prof: &Profile
+    private ls: Buf[&Listener]
+
+    private[mlt] ptr(self) -> *c.Transition = self.raw
+
+    /** Combine only from `in` to `out`, inclusive. */
+    set_in_and_out(self, in_point: int, out_point: int) =
+        c.transition_set_in_and_out(self.raw, i32(in_point), i32(out_point))
+
+    /** Combine track `b` into track `a`. */
+    set_tracks(self, a: int, b: int) = c.transition_set_tracks(self.raw, i32(a), i32(b))
+
+    a_track(self) -> int = c.transition_get_a_track(self.raw)
+    b_track(self) -> int = c.transition_get_b_track(self.raw)
+end Transition
+
+impl Object for Transition
+    properties_ptr(self) -> *c.Properties = c.transition_properties(self.raw)
+    listeners(self) -> Buf[&Listener] = self.ls
+
+impl Drop for Transition
+    drop(self)
+        disconnect_all(c.transition_properties(self.raw), self.ls)
+        c.transition_close(self.raw)
+
+/** The transition service `service`, with `arg` as its argument where it takes one. */
+transition(profile: &Profile, service: string, arg: string = "") -> Result[&Transition, Error]
+    init()?
+
+    if !registered(c.repository_transitions(c.factory_repository()), service)
+        return Err(UnknownService("transition", service))
+
+    val a = cstring(arg)
+    val t = c.factory_transition(profile.ptr(), cstring(service).ptr,
+                                 if arg == "" then null else a.ptr)
+
+    if t == null then return Err(Failed("mlt_factory_transition", -1))
+
+    Ok(Transition(t, profile, buf()))

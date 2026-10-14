@@ -1,0 +1,266 @@
+module sh.sysl.mlt
+
+import sh.sysl.mlt.c
+import sysl.buf.{Buf, buf}
+import sysl.text.{Search, cstring}
+
+/** Anything a consumer can be connected to and frames can be pulled from: a producer, a playlist,
+ * a tractor.
+ *
+ * **Positions are frame numbers** at the profile's frame rate, and `out` is inclusive: a producer
+ * whose `in` is `0` and `out` is `24` plays 25 frames.
+ */
+trait Source: Object
+    service_ptr(self) -> *c.Service
+    producer_ptr(self) -> *c.Producer
+    profile(self) -> &Profile
+
+    /** The position the next frame will come from. */
+    position(self) -> int = c.producer_position(self.producer_ptr())
+
+    /** Move to `position`. */
+    seek(self, position: int) -> Result[unit, Error] =
+        checked("mlt_producer_seek", c.producer_seek(self.producer_ptr(), i32(position)))
+
+    in_point(self) -> int = c.producer_get_in(self.producer_ptr())
+    out_point(self) -> int = c.producer_get_out(self.producer_ptr())
+
+    /** Play only `in` to `out`, inclusive. */
+    set_in_and_out(self, in_point: int, out_point: int) -> Result[unit, Error] =
+        checked("mlt_producer_set_in_and_out",
+                c.producer_set_in_and_out(self.producer_ptr(), i32(in_point), i32(out_point)))
+
+    /** How many frames play: `out - in + 1`. */
+    playtime(self) -> int = c.producer_get_playtime(self.producer_ptr())
+
+    /** How many frames the media has, whatever is selected of it. */
+    length(self) -> int = c.producer_get_length(self.producer_ptr())
+
+    speed(self) -> f64 = c.producer_get_speed(self.producer_ptr())
+
+    set_speed(self, speed: f64) -> Result[unit, Error] =
+        checked("mlt_producer_set_speed", c.producer_set_speed(self.producer_ptr(), speed))
+
+    fps(self) -> f64 = c.producer_get_fps(self.producer_ptr())
+
+    /** Attach `f`, which then processes every frame this source makes. The source holds a
+     * reference to the filter of its own. */
+    attach(self, f: &Filter) -> Result[unit, Error] =
+        checked("mlt_service_attach", c.service_attach(self.service_ptr(), f.ptr()))
+
+    detach(self, f: &Filter) -> Result[unit, Error] =
+        checked("mlt_service_detach", c.service_detach(self.service_ptr(), f.ptr()))
+
+    /** How many filters are attached. */
+    filter_count(self) -> int = c.service_filter_count(self.service_ptr())
+
+    /** The frame at the current position, which then moves on by one. */
+    frame(self) -> Result[&Frame, Error]
+        var f: *c.Frame = null
+
+        checked("mlt_service_get_frame", c.service_get_frame(self.service_ptr(), &f, 0))?
+
+        if f == null then return Err(Failed("mlt_service_get_frame", -1))
+
+        val p = self.profile()
+
+        Ok(adopt_frame(f, p.width(), p.height(), p.fps()))
+
+    /** The frame at `position`. */
+    frame_at(self, position: int) -> Result[&Frame, Error]
+        self.seek(position)?
+        self.frame()
+end Source
+
+/** A producer: a clip, a generator, or a file.
+ *
+ * It holds one MLT reference and gives it back when it is dropped. MLT counts the others: a playlist
+ * appending it, a tractor taking it as a track, a consumer connected to it each hold their own, so
+ * dropping this one does not stop it playing there.
+ */
+struct Producer
+    private raw: *c.Producer
+    private prof: &Profile
+    private ls: Buf[&Listener]
+
+    private[mlt] ptr(self) -> *c.Producer = self.raw
+
+    /** A new producer playing `in` to `out` of this one, sharing its media. */
+    cut(self, in_point: int, out_point: int) -> &Producer =
+        Producer(c.producer_cut(self.raw, i32(in_point), i32(out_point)), self.prof, buf())
+end Producer
+
+impl Object for Producer
+    properties_ptr(self) -> *c.Properties = c.producer_properties(self.raw)
+    listeners(self) -> Buf[&Listener] = self.ls
+
+impl Source for Producer
+    service_ptr(self) -> *c.Service = c.producer_service(self.raw)
+    producer_ptr(self) -> *c.Producer = self.raw
+    profile(self) -> &Profile = self.prof
+
+impl Drop for Producer
+    drop(self)
+        disconnect_all(c.producer_properties(self.raw), self.ls)
+        c.producer_close(self.raw)
+
+/** Whether the repository has a `kind` service called `name`. */
+private[mlt] registered(list: *c.Properties, name: string) -> bool =
+    list != null && c.properties_exists(list, cstring(name).ptr) != 0
+
+/** A producer for `resource`, chosen the way `melt` chooses one: a `service:argument` prefix names
+ * the service (`"color:#ff0000"`, `"noise:"`), and a path is opened by whichever producer reads it.
+ */
+producer(profile: &Profile, resource: string) -> Result[&Producer, Error]
+    init()?
+
+    val p = c.factory_producer(profile.ptr(), null, cstring(resource).ptr)
+
+    if p != null then return Ok(Producer(p, profile, buf()))
+
+    // A one-letter prefix is a Windows drive, not a service.
+    resource.index_of(":") match
+        Some(i) if i > 1 && !registered(c.repository_producers(c.factory_repository()), resource[0..<i]) ->
+            Err(UnknownService("producer", resource[0..<i]))
+        _ -> Err(MissingFile(resource))
+
+/** A producer made by the service `service` with `resource` as its argument. */
+service_producer(profile: &Profile, service: string, resource: string = "") -> Result[&Producer, Error]
+    init()?
+
+    if !registered(c.repository_producers(c.factory_repository()), service)
+        return Err(UnknownService("producer", service))
+
+    val p = c.factory_producer(profile.ptr(), cstring(service).ptr, cstring(resource).ptr)
+
+    if p == null then return Err(MissingFile(resource))
+
+    Ok(Producer(p, profile, buf()))
+
+/** A borrowed `mlt_producer` adopted: MLT kept its reference, so this takes one of its own. */
+private[mlt] borrowed_producer(p: *c.Producer, profile: &Profile) -> Option[&Producer]
+    if p == null then return None
+
+    c.properties_inc_ref(c.producer_properties(p))
+    Some(Producer(p, profile, buf()))
+
+/** A list of clips played one after another, with blanks between them where asked. */
+struct Playlist
+    private raw: *c.Playlist
+    private prof: &Profile
+    private ls: Buf[&Listener]
+
+    private[mlt] ptr(self) -> *c.Playlist = self.raw
+
+    /** How many entries, blanks included. */
+    clip_count(self) -> int = c.playlist_count(self.raw)
+
+    /** Play all of `p` next. The playlist holds a reference of its own. */
+    append[S: Source](self, p: &S) -> Result[unit, Error] =
+        checked("mlt_playlist_append", c.playlist_append(self.raw, p.producer_ptr()))
+
+    /** Play `in` to `out` of `p` next. */
+    append_io[S: Source](self, p: &S, in_point: int, out_point: int) -> Result[unit, Error] =
+        checked("mlt_playlist_append_io",
+                c.playlist_append_io(self.raw, p.producer_ptr(), i32(in_point), i32(out_point)))
+
+    /** A gap of `length` frames. */
+    blank(self, length: int) -> Result[unit, Error] =
+        checked("mlt_playlist_blank", c.playlist_blank(self.raw, i32(length - 1)))
+
+    remove(self, index: int) -> Result[unit, Error] =
+        checked("mlt_playlist_remove", c.playlist_remove(self.raw, i32(index)))
+
+    /** The clip at `index`, or `None` past the end. MLT lends it; this takes a reference of its own. */
+    clip(self, index: int) -> Option[&Producer] =
+        borrowed_producer(c.playlist_get_clip(self.raw, i32(index)), self.prof)
+
+    /** Where entry `index` starts. */
+    clip_start(self, index: int) -> int = c.playlist_clip_start(self.raw, i32(index))
+
+    /** How many frames entry `index` plays. */
+    clip_length(self, index: int) -> int = c.playlist_clip_length(self.raw, i32(index))
+
+    is_blank(self, index: int) -> bool = c.playlist_is_blank(self.raw, i32(index)) != 0
+
+    /** Mix the end of clip `index` into the start of the next over `length` frames with `t`. */
+    mix(self, index: int, length: int, t: &Transition) -> Result[unit, Error] =
+        checked("mlt_playlist_mix", c.playlist_mix(self.raw, i32(index), i32(length), t.ptr()))
+end Playlist
+
+impl Object for Playlist
+    properties_ptr(self) -> *c.Properties = c.producer_properties(c.playlist_producer(self.raw))
+    listeners(self) -> Buf[&Listener] = self.ls
+
+impl Source for Playlist
+    service_ptr(self) -> *c.Service = c.producer_service(c.playlist_producer(self.raw))
+    producer_ptr(self) -> *c.Producer = c.playlist_producer(self.raw)
+    profile(self) -> &Profile = self.prof
+
+impl Drop for Playlist
+    drop(self)
+        disconnect_all(self.properties_ptr(), self.ls)
+        c.playlist_close(self.raw)
+
+/** An empty playlist. */
+playlist(profile: &Profile) -> Result[&Playlist, Error]
+    init()?
+
+    val p = c.playlist_new(profile.ptr())
+
+    if p == null then return Err(Failed("mlt_playlist_new", -1))
+
+    Ok(Playlist(p, profile, buf()))
+
+/** Several tracks played at once, with transitions combining them and filters planted on them. */
+struct Tractor
+    private raw: *c.Tractor
+    private prof: &Profile
+    private ls: Buf[&Listener]
+
+    /** Make `p` track `index`. The tractor holds a reference of its own. */
+    set_track[S: Source](self, p: &S, index: int) -> Result[unit, Error] =
+        checked("mlt_tractor_set_track", c.tractor_set_track(self.raw, p.producer_ptr(), i32(index)))
+
+    /** Track `index`, or `None`. MLT lends it; this takes a reference of its own. */
+    track(self, index: int) -> Option[&Producer] =
+        borrowed_producer(c.tractor_get_track(self.raw, i32(index)), self.prof)
+
+    /** How many tracks. */
+    track_count(self) -> int = c.multitrack_count(c.tractor_multitrack(self.raw))
+
+    /** Combine track `b` into track `a` with `t`, over `t`'s in and out. */
+    plant_transition(self, t: &Transition, a: int, b: int) -> Result[unit, Error] =
+        checked("mlt_field_plant_transition",
+                c.field_plant_transition(c.tractor_field(self.raw), t.ptr(), i32(a), i32(b)))
+
+    /** Run `f` on track `track`. */
+    plant_filter(self, f: &Filter, track: int) -> Result[unit, Error] =
+        checked("mlt_field_plant_filter",
+                c.field_plant_filter(c.tractor_field(self.raw), f.ptr(), i32(track)))
+end Tractor
+
+impl Object for Tractor
+    properties_ptr(self) -> *c.Properties = c.producer_properties(c.tractor_producer(self.raw))
+    listeners(self) -> Buf[&Listener] = self.ls
+
+impl Source for Tractor
+    service_ptr(self) -> *c.Service = c.producer_service(c.tractor_producer(self.raw))
+    producer_ptr(self) -> *c.Producer = c.tractor_producer(self.raw)
+    profile(self) -> &Profile = self.prof
+
+impl Drop for Tractor
+    drop(self)
+        disconnect_all(self.properties_ptr(), self.ls)
+        c.tractor_close(self.raw)
+
+/** An empty tractor. */
+tractor(profile: &Profile) -> Result[&Tractor, Error]
+    init()?
+
+    val t = c.tractor_new()
+
+    if t == null then return Err(Failed("mlt_tractor_new", -1))
+
+    c.service_set_profile(c.producer_service(c.tractor_producer(t)), profile.ptr())
+    Ok(Tractor(t, profile, buf()))

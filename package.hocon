@@ -1,0 +1,37 @@
+// mlt — the MLT multimedia framework, bound for sysl.
+//
+// This is the block a consumer writes to reach this package:
+//
+//     dependencies {
+//       mlt { git = "github.com/sysl-lang/mlt", version = "0.1.0" }
+//     }
+//
+// **MLT has to be installed, and so do its headers and its plugins.** It is a framework of a core
+// library and some twenty plugin modules (`avformat`, `xml`, `core`, ...) loaded at run time, so a
+// package carrying it would be carrying a port rather than a binding.
+//
+//     brew install mlt              # macOS
+//     sudo apt install libmlt-dev   # Debian / Ubuntu (and libmlt-data, melt for the plugins)
+//
+// **MLT 7**, whose pkg-config name is `mlt-framework-7`. The plugin directory is the one the
+// library was built with, or `MLT_REPOSITORY` where it is somewhere else.
+
+package {
+  name    = "mlt"
+  version = "0.1.0"
+  sysl    = "0.1.0-alpha.11"
+}
+
+// **`posix`, because MLT is threads and files.** A consumer renders on a thread of its own and the
+// plugins are shared objects loaded from a directory.
+//
+// **`heap`, because every MLT object is a `&T`** whose destructor gives back the one reference it
+// holds.
+requires {
+  heap  = true
+  posix = true
+
+  pkg_config {
+    "mlt-framework-7" = "MLT 7 — `brew install mlt` on macOS, Debian's libmlt-dev"
+  }
+}

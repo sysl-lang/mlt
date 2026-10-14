@@ -1,0 +1,145 @@
+module sh.sysl.mlt
+
+import sh.sysl.mlt.c
+import sysl.env
+import sysl.text.{Search, cstring}
+
+/** Load MLT's plugin repository, once per process.
+ *
+ * The directory is `MLT_REPOSITORY` where that is set, and otherwise the one the library was built
+ * with — `$(brew --prefix mlt)/lib/mlt` for Homebrew's. **Every constructor in this package calls
+ * it**, so a program never has to; it is public for a program that wants the error early, or the
+ * repository's directory.
+ *
+ * MLT keeps the repository for the life of the process. Asking again answers the one already
+ * loaded, whatever directory is named the second time.
+ *
+ * **`deny` names modules not to load** (`"sdl2"`, `"qt6"`), through MLT's own `MLT_REPOSITORY_DENY`,
+ * and only on the first call. It matters for a program with no window: loading `sdl2` loads
+ * Homebrew's sdl2-compat, which looks for SDL3 beside the executable and in the system's library
+ * directories but not in `/opt/homebrew/lib`, and on failing puts a modal "Failed loading SDL3
+ * library" dialog on the screen and waits for it to be dismissed.
+ */
+init(deny: []const string = []) -> Result[string, Error]
+    if deny.len > 0 && c.factory_repository() == null then deny_modules(deny)
+
+    val dir = env.get("MLT_REPOSITORY")
+
+    val r = dir match
+        Some(d) -> c.factory_init(cstring(d).ptr)
+        None -> c.factory_init(null)
+
+    if r == null then return Err(NoRepository(dir.unwrap_or("")))
+
+    Ok(text_of(c.factory_directory()).unwrap_or(""))
+
+/** Add `modules` to `MLT_REPOSITORY_DENY`, MLT's own list of plugin modules it does not load, keeping
+ * whatever the environment already named. */
+private deny_modules(modules: []const string)
+    var names = env.get("MLT_REPOSITORY_DENY").unwrap_or("")
+
+    for m in modules
+        if names.len > 0 then names = names + ":"
+        names = names + "libmlt" + m
+
+    c.setenv(cstring("MLT_REPOSITORY_DENY").ptr, cstring(names).ptr, 1)
+
+/** Whether the loaded repository has a `kind` service — `"producer"`, `"filter"`, `"transition"` or
+ * `"consumer"` — called `name`. */
+has_service(kind: string, name: string) -> Result[bool, Error]
+    init()?
+
+    val r = c.factory_repository()
+    val list = kind match
+        "producer" -> c.repository_producers(r)
+        "filter" -> c.repository_filters(r)
+        "transition" -> c.repository_transitions(r)
+        _ -> c.repository_consumers(r)
+
+    Ok(registered(list, name))
+
+/** The version of the MLT library this program is linked against, `"7.40.0"`. */
+version() -> string = text_of(c.version_string()).unwrap_or("")
+
+/** A video format: frame size, frame rate, pixel and display aspect, colour space.
+ *
+ * Every service is made against one, and it is what turns a frame count into a time.
+ */
+struct Profile
+    private raw: *c.Profile
+
+    private[mlt] ptr(self) -> *c.Profile = self.raw
+
+    width(self) -> int = self.raw.width
+    height(self) -> int = self.raw.height
+    frame_rate_num(self) -> int = self.raw.frame_rate_num
+    frame_rate_den(self) -> int = self.raw.frame_rate_den
+    progressive(self) -> bool = self.raw.progressive != 0
+    colorspace(self) -> int = self.raw.colorspace
+
+    /** The description, `"HD 1080p 25 fps"`. */
+    description(self) -> string = text_of(self.raw.description).unwrap_or("")
+
+    /** Frames per second. */
+    fps(self) -> f64 = c.profile_fps(self.raw)
+
+    /** The sample (pixel) aspect ratio. */
+    sar(self) -> f64 = c.profile_sar(self.raw)
+
+    /** The display aspect ratio. */
+    dar(self) -> f64 = c.profile_dar(self.raw)
+end Profile
+
+impl Drop for Profile
+    drop(self) = c.profile_close(self.raw)
+
+/** The named profile from MLT's `profiles` directory — `"atsc_1080p_25"`, `"hdv_720_25p"` — or
+ * a path to a profile file.
+ *
+ * **MLT itself never refuses a name**: an unknown one answers the default profile. So the name is
+ * checked against the directory first, and an unknown one is `InvalidProfile`.
+ */
+profile(name: string) -> Result[&Profile, Error]
+    init()?
+
+    val dir = env.get("MLT_PROFILES_PATH") match
+        Some(d) -> d
+        None -> text_of(c.environment(cstring("MLT_DATA").ptr)).unwrap_or("") + "/profiles"
+    val file = if name.contains("/") then name else dir + "/" + name
+
+    val p = c.profile_load_file(cstring(file).ptr)
+
+    if p == null then return Err(InvalidProfile(name))
+
+    adopt_profile(p, name)
+
+/** A profile from its numbers. */
+custom_profile(width: int, height: int, fps_num: int, fps_den: int = 1, progressive: bool = true,
+               sar_num: int = 1, sar_den: int = 1) -> Result[&Profile, Error]
+    val text = s"width=$width\nheight=$height\nframe_rate_num=$fps_num\nframe_rate_den=$fps_den\n" +
+        s"progressive=${if progressive then 1 else 0}\nsample_aspect_num=$sar_num\n" +
+        s"sample_aspect_den=$sar_den\ndisplay_aspect_num=${width * sar_num}\n" +
+        s"display_aspect_den=${height * sar_den}\ncolorspace=601\n"
+
+    profile_from(text)
+
+/** A profile from MLT's own `key=value` lines, the format of a file in the `profiles` directory. */
+profile_from(text: string) -> Result[&Profile, Error]
+    init()?
+
+    val p = c.profile_load_string(cstring(text).ptr)
+
+    if p == null then return Err(InvalidProfile(text))
+
+    // MLT copies a profile with `strdup(description)` whenever a producer normalises one, so a
+    // description the text did not give would be a null pointer read later and far from here.
+    if p.description == null then p.description = c.strdup(cstring("custom").ptr)
+
+    adopt_profile(p, text)
+
+private adopt_profile(p: *c.Profile, name: string) -> Result[&Profile, Error]
+    val owned: &Profile = Profile(p)
+
+    if c.profile_is_valid(p) == 0 then return Err(InvalidProfile(name))
+
+    Ok(owned)

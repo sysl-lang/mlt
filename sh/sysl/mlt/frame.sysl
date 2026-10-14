@@ -1,0 +1,147 @@
+module sh.sysl.mlt
+
+import sh.sysl.mlt.c
+import sysl.buf.{Buf, buf}
+
+/** The pixel layouts a frame can be asked for. */
+enum ImageFormat
+    /** Three bytes a pixel: red, green, blue. */
+    Rgb
+
+    /** Four bytes a pixel: red, green, blue, alpha. */
+    Rgba
+
+    /** Packed 4:2:2 — Y0 U Y1 V, two bytes a pixel. */
+    Yuv422
+
+    /** Planar 4:2:0 — the Y plane, then U and V at a quarter of its size each. */
+    Yuv420p
+
+    private[mlt] code(self) -> i32 = self match
+        Rgb -> c.IMAGE_RGB
+        Rgba -> c.IMAGE_RGBA
+        Yuv422 -> c.IMAGE_YUV422
+        Yuv420p -> c.IMAGE_YUV420P
+end ImageFormat
+
+/** The sample layouts a frame's audio can be asked for. */
+enum AudioFormat
+    /** Signed 16-bit, interleaved. */
+    S16
+
+    /** Signed 32-bit, one plane per channel. */
+    S32
+
+    /** 32-bit float, one plane per channel. */
+    Float
+
+    /** Signed 32-bit, interleaved. */
+    S32le
+
+    /** 32-bit float, interleaved. */
+    F32le
+
+    /** Unsigned 8-bit, interleaved. */
+    U8
+
+    private[mlt] code(self) -> i32 = self match
+        S16 -> c.AUDIO_S16
+        S32 -> c.AUDIO_S32
+        Float -> c.AUDIO_FLOAT
+        S32le -> c.AUDIO_S32LE
+        F32le -> c.AUDIO_F32LE
+        U8 -> c.AUDIO_U8
+end AudioFormat
+
+/** One frame: its image, its audio and its properties, made on demand.
+ *
+ * The frame holds one MLT reference and gives it back when it is dropped.
+ */
+struct Frame
+    private raw: *c.Frame
+    private width: int
+    private height: int
+    private fps: f64
+    private ls: Buf[&Listener]
+
+    /** The position this frame was made at. */
+    position(self) -> int = c.frame_get_position(self.raw)
+
+    /** The image, rendered in `format` at the profile's size — or at `width` × `height` where those
+     * are given.
+     *
+     * **The pixels belong to the frame.** The `Image` holds the frame, so its `pixels` are valid
+     * for as long as the `Image` is; a slice taken out of it is valid only while the `Image` or this
+     * frame is still held, because a view of C's memory carries no reference to anything.
+     */
+    image(self, format: ImageFormat = Rgba, width: int = 0, height: int = 0) -> Result[Image, Error]
+        var data: *u8 = null
+        var fmt = format.code()
+        var w = i32(if width > 0 then width else self.width)
+        var h = i32(if height > 0 then height else self.height)
+
+        checked("mlt_frame_get_image", c.frame_get_image(self.raw, &data, &fmt, &w, &h, 0))?
+
+        if data == null then return Err(NoMedia("image"))
+
+        val size = c.image_format_size(fmt, w, h, null)
+
+        Ok(Image(self.boxed(), format, w, h, data[0..<usize(size)]))
+
+    /** The audio, in `format` at `frequency` with `channels` channels. `samples` of `0` asks for
+     * the number that falls in this frame at the profile's frame rate.
+     *
+     * The samples belong to the frame on the same terms as an image's pixels.
+     */
+    audio(self, format: AudioFormat = S16, frequency: int = 48000, channels: int = 2,
+          samples: int = 0) -> Result[Audio, Error]
+        var data: *u8 = null
+        var fmt = format.code()
+        var freq = i32(frequency)
+        var ch = i32(channels)
+        var n = i32(samples)
+
+        if n == 0 then n = c.audio_calculate_frame_samples(f32(self.fps), freq, long(self.position()))
+
+        checked("mlt_frame_get_audio", c.frame_get_audio(self.raw, &data, &fmt, &freq, &ch, &n))?
+
+        if data == null then return Err(NoMedia("audio"))
+
+        val size = c.audio_format_size(fmt, n, ch)
+
+        Ok(Audio(self.boxed(), format, freq, ch, n, data[0..<usize(size)]))
+
+    private boxed(self) -> &Frame
+        c.properties_inc_ref(c.frame_properties(self.raw))
+        adopt_frame(self.raw, self.width, self.height, self.fps)
+end Frame
+
+impl Object for Frame
+    properties_ptr(self) -> *c.Properties = c.frame_properties(self.raw)
+    listeners(self) -> Buf[&Listener] = self.ls
+
+impl Drop for Frame
+    drop(self)
+        disconnect_all(c.frame_properties(self.raw), self.ls)
+        c.frame_close(self.raw)
+
+/** A frame MLT handed over with a reference that is now this binding's. */
+private[mlt] adopt_frame(f: *c.Frame, width: int, height: int, fps: f64) -> &Frame =
+    Frame(f, width, height, fps, buf())
+
+/** A frame's image. `frame` keeps the pixels alive. */
+struct Image
+    frame: &Frame
+    format: ImageFormat
+    width: int
+    height: int
+    pixels: []const u8
+
+/** A frame's audio. `frame` keeps the samples alive. */
+struct Audio
+    frame: &Frame
+    format: AudioFormat
+    frequency: int
+    channels: int
+    samples: int
+    data: []const u8

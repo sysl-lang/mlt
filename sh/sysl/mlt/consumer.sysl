@@ -1,0 +1,71 @@
+module sh.sysl.mlt
+
+import sh.sysl.mlt.c
+import sysl.buf.{Buf, buf}
+import sysl.text.cstring
+import sysl.time.{millis, sleep}
+
+/** A consumer: where frames go — a file through `avformat`, an MLT XML document through `xml`, or
+ * nowhere through `null`.
+ *
+ * **A started consumer renders on a thread of its own**, which is why its events reach a listener on
+ * that thread and why `on` takes a `&sync Fn`. Dropping it stops it first.
+ */
+struct Consumer
+    private raw: *c.Consumer
+    private prof: &Profile
+    private ls: Buf[&Listener]
+
+    /** Take frames from `src`. The consumer holds a reference to it of its own. */
+    connect[S: Source](self, src: &S) -> Result[unit, Error] =
+        checked("mlt_consumer_connect", c.consumer_connect(self.raw, src.service_ptr()))
+
+    /** Start rendering, on the consumer's own thread. */
+    start(self) -> Result[unit, Error] = checked("mlt_consumer_start", c.consumer_start(self.raw))
+
+    /** Stop rendering, and wait for the thread to finish. */
+    stop(self) -> Result[unit, Error] = checked("mlt_consumer_stop", c.consumer_stop(self.raw))
+
+    is_stopped(self) -> bool = c.consumer_is_stopped(self.raw) != 0
+
+    /** The position of the last frame consumed. */
+    position(self) -> int = c.consumer_position(self.raw)
+
+    /** Wait until the consumer stops on its own, which it does at the end of its source when
+     * `terminate_on_pause` is set. This is the wait `melt` makes, a check every ten milliseconds. */
+    wait(self)
+        while !self.is_stopped() do sleep(millis(10))
+
+    /** Render the whole source and return once it is done: `start`, then `wait`, then `stop`. */
+    run(self) -> Result[unit, Error]
+        self.set_int("terminate_on_pause", 1)?
+        self.start()?
+        self.wait()
+        self.stop()
+end Consumer
+
+impl Object for Consumer
+    properties_ptr(self) -> *c.Properties = c.consumer_properties(self.raw)
+    listeners(self) -> Buf[&Listener] = self.ls
+
+impl Drop for Consumer
+    drop(self)
+        c.consumer_stop(self.raw)
+        disconnect_all(c.consumer_properties(self.raw), self.ls)
+        c.consumer_close(self.raw)
+
+/** The consumer service `service` writing to `target` — a file name for `avformat` and `xml`,
+ * nothing for `null`. */
+consumer(profile: &Profile, service: string, target: string = "") -> Result[&Consumer, Error]
+    init()?
+
+    if !registered(c.repository_consumers(c.factory_repository()), service)
+        return Err(UnknownService("consumer", service))
+
+    val t = cstring(target)
+    val k = c.factory_consumer(profile.ptr(), cstring(service).ptr,
+                               if target == "" then null else t.ptr)
+
+    if k == null then return Err(Failed("mlt_factory_consumer", -1))
+
+    Ok(Consumer(k, profile, buf()))

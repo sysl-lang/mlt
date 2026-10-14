@@ -1,0 +1,38 @@
+module sh.sysl.mlt
+@tests
+
+// The README's example, compiled and run, so the page cannot drift from the package.
+
+import sysl.fs.{make_temp_dir, remove_dir_all}
+import sysl.sync.Atomic
+
+private struct Progress
+    frames: Atomic[int]
+
+// -- README example begins
+render_title(file: string) -> Result[int, Error]
+    val prof = profile("atsc_720p_25")?
+    val show = playlist(prof)?
+
+    show.append_io(producer(prof, "color:#202020")?, 0, 24)?
+    show.append_io(producer(prof, "color:#c04000")?, 0, 24)?
+
+    val out = consumer(prof, "avformat", file)?
+    val progress: &sync Progress = Progress(Atomic(0))
+
+    out.set("vcodec", "mpeg4")?
+    out.set_int("an", 1)?
+    out.on("consumer-frame-show", (e) -> progress.frames.add(1))
+    out.connect(show)?
+    out.run()?
+
+    Ok(progress.frames.load())
+// -- README example ends
+
+@test("the README's example renders both clips")
+readme_example()
+    val dir = make_temp_dir("sysl-mlt").expect("a temp dir")
+
+    assert_eq(render_title(dir + "/title.mp4"), Ok(50))
+
+    remove_dir_all(dir).expect("removed")
