@@ -4,6 +4,8 @@
 for sysl: profiles, producers, filters, transitions, playlists, tractors, consumers, frames with their
 pixels and samples, and events — including the ones a consumer fires from its render thread.
 
+*An independent sysl package for MLT. It is not affiliated with or endorsed by MLT's authors or trademark holders.*
+
 ```hocon
 dependencies {
   mlt { git = "github.com/sysl-lang/mlt", version = "0.1.0" }
