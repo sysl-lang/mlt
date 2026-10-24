@@ -8,7 +8,7 @@ pixels and samples, and events — including the ones a consumer fires from its 
 
 ```hocon
 dependencies {
-  mlt { git = "github.com/sysl-lang/mlt", version = "0.1.0" }
+  mlt { git = "github.com/sysl-lang/mlt", version = "0.1.1" }
 }
 ```
 
