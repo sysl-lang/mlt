@@ -58,7 +58,7 @@ has_service(kind: string, name: string) -> Result[bool, Error]
 
     Ok(registered(list, name))
 
-/** The version of the MLT library this program is linked against, `"7.40.0"`. */
+/** The version of the MLT library this program is linked against, for example `"7.42.0"`. */
 version() -> string = text_of(c.version_string()).unwrap_or("")
 
 /** A video format: frame size, frame rate, pixel and display aspect, colour space.

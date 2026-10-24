@@ -12,7 +12,7 @@ import sysl.fs.{make_temp_dir, read_text, remove_dir_all}
 import sysl.posix.threads.{current, yield_now}
 import sysl.process.capture
 import sysl.sync.Atomic
-import sysl.text.Search
+import sysl.text.{Search, parse_int, replace_all, split}
 
 // **No test may load a module that touches the screen or a device.** `sdl2` puts a modal dialog up
 // when SDL3 cannot be found (see `init`), `qt6` is a GUI toolkit, `rtaudio` and `decklink` open
@@ -379,15 +379,65 @@ xml_document()
 
     val got = read_text(file).expect("the document")
 
-    assert_eq(got, XML_EXPECTED)
+    // The document names the library that wrote it. Which MLT 7 is installed is not this test's
+    // business, so the stamp is checked for its shape and its minimum, and for being the version
+    // the library reports; the rest of the document is compared exactly.
+    val stamp = version_stamp(got).expect("a version attribute on <mlt>")
+
+    assert_eq(stamp, version())
+    assert(version_at_least(stamp, 7, 0), "MLT 7 or later")
+
+    assert_eq(got, replace_all(XML_EXPECTED, VERSION_MARK, stamp))
 
     remove_dir_all(dir).expect("removed")
 
+@test("version_stamp reads the attribute, and refuses a stamp that is not major.minor.patch")
+version_stamp_shape()
+    assert_eq(version_stamp("<mlt version=\"7.42.0\" root=\"\">"), Some("7.42.0"))
+    assert_eq(version_stamp("<?xml version=\"1.0\"?>\n<mlt version=\"7.42.0\">"), Some("7.42.0"))
+    assert_eq(version_stamp("<?xml version=\"1.0\"?>\n<mlt root=\"\">"), None)
+    assert_eq(version_stamp("<mlt version=\"7.42\">"), None)
+    assert_eq(version_stamp("<mlt version=\"7.x.0\">"), None)
+    assert_eq(version_stamp("<mlt version=\"7.42.0"), None)
+    assert(version_at_least("7.42.0", 7, 40))
+    assert(version_at_least("7.40.0", 7, 40))
+    assert(version_at_least("8.0.0", 7, 40))
+    assert(!version_at_least("7.39.9", 7, 40))
+    assert(!version_at_least("6.99.0", 7, 0))
+
+// The `version` attribute of the `<mlt>` element (not the XML declaration's), when its value is
+// three dot-separated numbers.
+private version_stamp(doc: string) -> Option[string]
+    val key = "version=\""
+    val root = doc.index_of("<mlt ")?
+    val at = doc.index_of_from(key, root)?
+    val rest = doc[(at + key.len)..]
+    val close = rest.index_of_byte(u8('"'))?
+    val stamp = rest[0..<close]
+    val parts = split(stamp, ".")
+
+    if parts.len != 3 then return None
+
+    for p in parts
+        if parse_int(p).is_err() then return None
+
+    Some(stamp)
+
+private version_at_least(stamp: string, major: int, minor: int) -> bool
+    val parts = split(stamp, ".")
+    val have_major = parse_int(parts[0]).unwrap()
+    val have_minor = parse_int(parts[1]).unwrap()
+
+    have_major > major || (have_major == major && have_minor >= minor)
+
+private val VERSION_MARK: string = "@VERSION@"
+
 // The document for: a red clip's frames 0 to 9 and five blank frames on track 0, a blue clip on
-// track 1. A colour producer is 15000 frames long until it is told otherwise.
+// track 1. A colour producer is 15000 frames long until it is told otherwise. `@VERSION@` stands
+// for the installed library's version.
 private val XML_EXPECTED: string = raw"""
 <?xml version="1.0" encoding="utf-8"?>
-<mlt LC_NUMERIC="C" version="7.40.0" root="">
+<mlt LC_NUMERIC="C" version="@VERSION@" root="">
   <profile description="custom" width="64" height="48" progressive="1" sample_aspect_num="1" sample_aspect_den="1" display_aspect_num="64" display_aspect_den="48" frame_rate_num="25" frame_rate_den="1" colorspace="601"/>
   <producer id="producer0" in="0" out="14999">
     <property name="length">15000</property>
