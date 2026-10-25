@@ -3,7 +3,7 @@
 // This is the block a consumer writes to reach this package:
 //
 //     dependencies {
-//       mlt { git = "github.com/sysl-lang/mlt", version = "0.1.1" }
+//       mlt { git = "github.com/sysl-lang/mlt", version = "0.1.2" }
 //     }
 //
 // **MLT has to be installed, and so do its headers and its plugins.** It is a framework of a core
@@ -18,8 +18,8 @@
 
 package {
   name    = "mlt"
-  version = "0.1.1"
-  sysl    = "0.1.0-alpha.11"
+  version = "0.1.2"
+  sysl    = "0.6.0"
 }
 
 // **`posix`, because MLT is threads and files.** A consumer renders on a thread of its own and the

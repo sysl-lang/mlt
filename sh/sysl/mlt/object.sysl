@@ -2,6 +2,7 @@ module sh.sysl.mlt
 
 import sh.sysl.mlt.c
 import sysl.buf.{Buf, buf}
+import sysl.raw.ptr_cast
 import sysl.text.{cstring, from_cstring}
 
 /** How a time is written: a frame count, a clock time, or one of the two SMPTE timecodes. */
